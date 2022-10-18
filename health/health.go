@@ -47,6 +47,7 @@ var (
 	udp4Unbound             bool
 	controlHealth           []string
 	lastLoginErr            error
+	localLogConfigErr       error
 )
 
 // Subsystem is the name of a subsystem whose health can be monitored.
@@ -194,6 +195,9 @@ func SetDNSManagerHealth(err error) { set(SysDNSManager, err) }
 
 // DNSOSHealth returns the net/dns.OSConfigurator error state.
 func DNSOSHealth() error { return get(SysDNSOS) }
+
+// SetLocalLogConfigHealth sets the error state of this client's local log configuration.
+func SetLocalLogConfigHealth(err error) { localLogConfigErr = err }
 
 func RegisterDebugHandler(typ string, h http.Handler) {
 	mu.Lock()
@@ -404,6 +408,9 @@ func overallErrorLocked() error {
 	}
 	if lastLoginErr != nil {
 		return fmt.Errorf("not logged in, last login error=%v", lastLoginErr)
+	}
+	if localLogConfigErr != nil {
+		return localLogConfigErr
 	}
 	now := time.Now()
 	if !inMapPoll && (lastMapPollEndedAt.IsZero() || now.Sub(lastMapPollEndedAt) > 10*time.Second) {

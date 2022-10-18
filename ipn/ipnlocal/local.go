@@ -892,6 +892,13 @@ func (b *LocalBackend) setClientStatus(st controlclient.Status) {
 	}
 
 	if st.NetMap != nil {
+		if envknob.NoLogsNoSupport() && hasCapability(st.NetMap, tailcfg.CapabilityDataPlaneAuditLogs) {
+			msg := "tailnet requires logging to be enabled. Remove -no-logs-no-support from tailscaled command line."
+			health.SetLocalLogConfigHealth(errors.New(msg))
+			b.send(ipn.Notify{ErrMessage: &msg})
+			b.ResetForClientDisconnect()
+			return
+		}
 		if netMap != nil {
 			diff := st.NetMap.ConciseDiffFrom(netMap)
 			if strings.TrimSpace(diff) == "" {
@@ -3179,12 +3186,11 @@ func (b *LocalBackend) resetControlClientLockedAsync() {
 	b.ccAuto = nil
 }
 
-// ResetForClientDisconnect resets the backend for GUI clients running
-// in interactive (non-headless) mode. This is currently used only by
-// Windows. This causes all state to be cleared, lest an unrelated user
-// connect to tailscaled next. But it does not trigger a logout; we
-// don't want to the user to have to reauthenticate in the future
-// when they restart the GUI.
+// ResetForClientDisconnect resets the backend for clients running
+// in interactive (non-headless) mode. This causes all state to be cleared,
+// lest an unrelated user connect to tailscaled next. But it does not trigger
+// a logout; we don't want to the user to have to reauthenticate in the future
+// when they restart the client.
 func (b *LocalBackend) ResetForClientDisconnect() {
 	defer b.enterState(ipn.Stopped)
 	b.mu.Lock()
