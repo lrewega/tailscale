@@ -7,14 +7,15 @@ package portlist
 import (
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
 	"tailscale.com/net/netstat"
+	"tailscale.com/util/winutil"
 )
 
-// Forking on Windows is insanely expensive, so don't do it too often.
 const pollInterval = 5 * time.Second
 
 func init() {
@@ -24,7 +25,7 @@ func init() {
 type famPort struct {
 	proto string
 	port  uint16
-	pid   uintptr
+	pid   uint32
 }
 
 type windowsImpl struct {
@@ -52,6 +53,8 @@ func (im *windowsImpl) AppendListeningPorts(base []Port) ([]Port, error) {
 		return nil, err
 	}
 
+	pi := newPidInfo()
+
 	for _, pm := range im.known {
 		pm.keep = false
 	}
@@ -67,7 +70,7 @@ func (im *windowsImpl) AppendListeningPorts(base []Port) ([]Port, error) {
 		fp := famPort{
 			proto: "tcp", // TODO(bradfitz): UDP too; add to netstat
 			port:  e.Local.Port(),
-			pid:   uintptr(e.Pid),
+			pid:   uint32(e.Pid),
 		}
 		pm, ok := im.known[fp]
 		if ok {
@@ -79,7 +82,7 @@ func (im *windowsImpl) AppendListeningPorts(base []Port) ([]Port, error) {
 			port: Port{
 				Proto:   "tcp",
 				Port:    e.Local.Port(),
-				Process: procNameOfPid(e.Pid),
+				Process: pi.get(uint32(e.Pid)),
 			},
 		}
 		im.known[fp] = pm
@@ -92,29 +95,112 @@ func (im *windowsImpl) AppendListeningPorts(base []Port) ([]Port, error) {
 		}
 		ret = append(ret, m.port)
 	}
+
 	return sortAndDedup(ret), nil
 }
 
-func procNameOfPid(pid int) string {
-	const da = windows.PROCESS_QUERY_LIMITED_INFORMATION
-	h, err := syscall.OpenProcess(da, false, uint32(pid))
+// pidInfo is a mapping of process IDs to process names that incorporates
+// information from Windows' Service Control Manager. We use this information
+// to disambiguate svchost processes (when possible).
+type pidInfo map[uint32]string
+
+// newPidInfo instantiates a pidInfo and pre-populates it with PID mappings for
+// all Windows services that are currently running.
+func newPidInfo() (result pidInfo) {
+	defer func() {
+		// Default to empty if we failed to obtain the service list.
+		if result == nil {
+			result = make(pidInfo)
+		}
+	}()
+
+	scm, err := winutil.ConnectToLocalSCMForRead()
+	if err != nil {
+		return result
+	}
+	defer scm.Disconnect()
+
+	services, err := scm.ListServices()
+	if err != nil {
+		return result
+	}
+
+	result = make(pidInfo, len(services))
+
+	// Pre-populate result with the PIDs for all running services.
+	for _, s := range services {
+		result.maybeAddService(scm, s)
+	}
+
+	return result
+}
+
+// maybeAddService attempts to obtain PID information about the service named
+// svcName, and adds either its process name, or in the case of services hosted
+// by svchost.exe, svcName itself, to pi.
+func (pi pidInfo) maybeAddService(scm *mgr.Mgr, svcName string) {
+	service, err := winutil.OpenServiceForRead(scm, svcName)
+	if err != nil {
+		return
+	}
+	defer service.Close()
+
+	status, err := service.Query()
+	// Stopped services do not have PIDs, and StopPending services will
+	// imminently become defunct.
+	if err != nil || status.State == svc.Stopped || status.State == svc.StopPending || status.ProcessId == 0 {
+		return
+	}
+
+	if _, ok := pi[status.ProcessId]; ok {
+		// We already have seen this process (possible with shared services).
+		return
+	}
+
+	procName, err := getProcessName(status.ProcessId)
+	if err != nil {
+		return
+	}
+
+	useName := &procName
+	if strings.EqualFold(procName, "svchost") {
+		if cfg, err := service.Config(); err == nil && cfg.ServiceType == windows.SERVICE_WIN32_OWN_PROCESS {
+			// For services hosted individually inside a svchost process, substitute
+			// the name of the service for the name of the process.
+			useName = &svcName
+		}
+
+		// Otherwise there are multiple services hosted by this process and we do
+		// not have a way to automagically know which service is the "correct" one
+		// that corresponds to a particular port.
+	}
+
+	pi[status.ProcessId] = *useName
+}
+
+func (pi pidInfo) get(pid uint32) string {
+	if s, ok := pi[pid]; ok {
+		return s
+	}
+
+	procName, err := getProcessName(pid)
 	if err != nil {
 		return ""
 	}
-	defer syscall.CloseHandle(h)
 
-	var buf [512]uint16
-	var size = uint32(len(buf))
-	if err := windows.QueryFullProcessImageName(windows.Handle(h), 0, &buf[0], &size); err != nil {
-		return ""
+	pi[pid] = procName
+	return procName
+}
+
+// getProcessName returns the name of the executable image corresponding to the
+// process identified by pid, with path and extension stripped off.
+func getProcessName(pid uint32) (string, error) {
+	procName, err := winutil.GetProcessImageName(pid)
+	if err != nil {
+		return "", nil
 	}
-	name := filepath.Base(windows.UTF16ToString(buf[:]))
-	if name == "." {
-		return ""
-	}
-	name = strings.TrimSuffix(name, ".exe")
-	name = strings.TrimSuffix(name, ".EXE")
-	return name
+
+	return strings.TrimSuffix(filepath.Base(procName), filepath.Ext(procName)), nil
 }
 
 func appendListeningPorts([]Port) ([]Port, error) {

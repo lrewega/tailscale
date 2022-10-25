@@ -60,13 +60,13 @@ type walkSvcFunc func(*mgr.Service, mgr.Config)
 // walkServices opens the service named rootSvcName and walks its dependency
 // graph, invoking callback for each service (including the root itself).
 func walkServices(rootSvcName string, callback walkSvcFunc) error {
-	scm, err := connectToLocalSCMForRead()
+	scm, err := ConnectToLocalSCMForRead()
 	if err != nil {
 		return fmt.Errorf("connecting to Service Control Manager: %w", err)
 	}
 	defer scm.Disconnect()
 
-	rootSvc, err := openServiceForRead(scm, rootSvcName)
+	rootSvc, err := OpenServiceForRead(scm, rootSvcName)
 	if err != nil {
 		return fmt.Errorf("opening service %q: %w", rootSvcName, err)
 	}
@@ -102,7 +102,7 @@ func walkServices(rootSvcName string, callback walkSvcFunc) error {
 					continue
 				}
 
-				depSvc, err := openServiceForRead(scm, depName)
+				depSvc, err := OpenServiceForRead(scm, depName)
 				if err != nil {
 					return fmt.Errorf("opening service %q: %w", depName, err)
 				}
@@ -274,30 +274,4 @@ func makeLogEntry(svc *mgr.Service, status svc.Status, cfg mgr.Config) (entry sv
 	}
 
 	return entry
-}
-
-// connectToLocalSCMForRead connects to the Windows Service Control Manager with
-// read-only access. x/sys/windows/svc/mgr/Connect requests read+write access,
-// which requires higher privileges than we want.
-func connectToLocalSCMForRead() (*mgr.Mgr, error) {
-	h, err := windows.OpenSCManager(nil, nil, windows.GENERIC_READ)
-	if err != nil {
-		return nil, err
-	}
-	return &mgr.Mgr{Handle: h}, nil
-}
-
-// openServiceForRead opens a service with read-only access.
-// x/sys/windows/svc/mgr/(*Mgr).OpenService requests read+write access,
-// which requires higher privileges than we want.
-func openServiceForRead(scm *mgr.Mgr, svcName string) (*mgr.Service, error) {
-	svcNamePtr, err := windows.UTF16PtrFromString(svcName)
-	if err != nil {
-		return nil, err
-	}
-	h, err := windows.OpenService(scm.Handle, svcNamePtr, windows.GENERIC_READ)
-	if err != nil {
-		return nil, err
-	}
-	return &mgr.Service{Name: svcName, Handle: h}, nil
 }

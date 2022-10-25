@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+	"golang.org/x/sys/windows/svc/mgr"
 )
 
 const (
@@ -482,4 +483,69 @@ func OpenKeyWait(k registry.Key, path RegistryPath, access uint32) (registry.Key
 
 		k = key
 	}
+}
+
+// GetProcessImageName returns the absolute path to the executable image for the
+// process specified by pid, or an error if this fails.
+func GetProcessImageName(pid uint32) (string, error) {
+	ph, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(ph)
+
+	// Newer Windows versions may produce paths longer than MAX_PATH if the current
+	// process is opted in (via manifest), so we're going to make the buffer
+	// growable for future-proofing purposes.
+	pathBufLen := windows.MAX_PATH
+	var pathBuf []uint16
+
+	var actualPathLen uint32
+
+	for {
+		pathBuf = make([]uint16, pathBufLen)
+
+		actualPathLen = uint32(pathBufLen)
+		err = windows.QueryFullProcessImageName(
+			ph,
+			0, // Output a Win32 path, not a Native NT path
+			&pathBuf[0],
+			&actualPathLen,
+		)
+		if err == nil {
+			break
+		}
+		if err != windows.ERROR_INSUFFICIENT_BUFFER {
+			return "", err
+		}
+		// Unfortunately QueryFullProcessImageName does not follow the idiom where,
+		// upon ERROR_INSUFFICIENT_BUFFER, actualPathLen would contain the required
+		// buffer size. Instead we simply double the buffer length before retrying.
+		pathBufLen *= 2
+	}
+
+	// actualPathLen excludes the null terminator on output
+	return windows.UTF16ToString(pathBuf[:actualPathLen]), nil
+}
+
+// ConnectToLocalSCMForRead connects to the Windows Service Control Manager with
+// read-only access. x/sys/windows/svc/mgr/Connect requests read+write access,
+// which requires higher privileges than we might want.
+func ConnectToLocalSCMForRead() (*mgr.Mgr, error) {
+	h, err := windows.OpenSCManager(nil, nil, windows.GENERIC_READ)
+	if err != nil {
+		return nil, err
+	}
+	return &mgr.Mgr{Handle: h}, nil
+}
+
+// OpenServiceForRead opens a service with read-only access.
+// x/sys/windows/svc/mgr/(*Mgr).OpenService requests read+write access,
+// which requires higher privileges than we might want.
+func OpenServiceForRead(scm *mgr.Mgr, name string) (*mgr.Service, error) {
+	h, err := windows.OpenService(scm.Handle, windows.StringToUTF16Ptr(name), windows.GENERIC_READ)
+	if err != nil {
+		return nil, err
+	}
+	return &mgr.Service{Name: name, Handle: h}, nil
 }
