@@ -27,10 +27,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode"
 
 	"go4.org/mem"
 	"inet.af/peercred"
+	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/control/controlclient"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
@@ -1007,12 +1007,46 @@ func (psc *protoSwitchConn) Close() error {
 	return nil
 }
 
+// validHost reports whether h is a valid Host header value for a LocalAPI request.
+func validHost(h string) bool {
+	// The client code sends a hostname of "local-tailscaled.sock".
+	switch h {
+	case "", apitype.LocalAPIHost:
+		return true
+	}
+	// Allow either localhost or loopback IP hosts.
+	host, portStr, err := net.SplitHostPort(h)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" && port != safesocket.WindowsLocalPort {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	addr, err := netip.ParseAddr(h)
+	if err != nil {
+		return false
+	}
+	return addr.IsLoopback()
+}
+
 func (s *Server) localhostHandler(ci connIdentity) http.Handler {
 	lah := localapi.NewHandler(s.b, s.logf, s.backendLogID)
 	lah.PermitRead, lah.PermitWrite = s.localAPIPermissions(ci)
 	lah.PermitCert = s.connCanFetchCerts(ci)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Referer() != "" || r.Header.Get("Origin") != "" || !validHost(r.Host) {
+			http.Error(w, "invalid request", http.StatusForbidden)
+			return
+		}
+
 		if strings.HasPrefix(r.URL.Path, "/localapi/") {
 			lah.ServeHTTP(w, r)
 			return
@@ -1029,13 +1063,9 @@ func (s *Server) localhostHandler(ci connIdentity) http.Handler {
 // Windows and via $DEBUG_LISTENER/debug/ipn when tailscaled's --debug flag
 // is used to run a debug server.
 func (s *Server) ServeHTMLStatus(w http.ResponseWriter, r *http.Request) {
-	// As this is only meant for debug, verify there's no DNS name being used to
-	// access this.
-	if strings.IndexFunc(r.Host, unicode.IsLetter) != -1 {
-		http.Error(w, "invalid host", http.StatusForbidden)
-		return
-	}
-
+	w.Header().Set("Content-Security-Policy", `default-src 'none'; frame-ancestors 'none'; script-src 'none'; script-src-elem 'none'; script-src-attr 'none'`)
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	st := s.b.Status()
 	// TODO(bradfitz): add LogID and opts to st?
