@@ -272,3 +272,12 @@ qilin
 fluffy
 bun
 mercat
+bison
+buffalo
+gaur
+saola
+anoa
+banteng
+beefalo
+yak
+cow
